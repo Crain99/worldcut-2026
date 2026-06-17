@@ -1637,10 +1637,14 @@ def _build_sporttery_odds_snapshot() -> dict:
     finished_results = fetch_worldcup_results()
     matches = []
     finished_count = 0
+    started_count = 0
     for item in parsed_matches:
         finished = match_result_for_teams(item.get("home", ""), item.get("away", ""), finished_results)
         if finished:
             finished_count += 1
+            continue
+        if match_has_started(item):
+            started_count += 1
             continue
         matches.append(item)
     if matches:
@@ -1656,6 +1660,7 @@ def _build_sporttery_odds_snapshot() -> dict:
         "matches": matches[:200],
         "raw_count": len(parsed_matches),
         "filtered_finished_count": finished_count,
+        "filtered_started_count": started_count,
         "generated_at": beijing_time(),
         "official_url": SPORTTERY_OFFICIAL_URL,
     }
@@ -1683,10 +1688,14 @@ def _build_sporttery_calculator_snapshot(force_refresh: bool = False) -> dict:
     finished_results = fetch_worldcup_results()
     matches = []
     finished_count = 0
+    started_count = 0
     for item in parsed_matches:
         finished = match_result_for_teams(item.get("home", ""), item.get("away", ""), finished_results)
         if finished:
             finished_count += 1
+            continue
+        if match_has_started(item):
+            started_count += 1
             continue
         matches.append(item)
     return {
@@ -1697,6 +1706,7 @@ def _build_sporttery_calculator_snapshot(force_refresh: bool = False) -> dict:
         "matches": matches[:200],
         "raw_count": len(parsed_matches),
         "filtered_finished_count": finished_count,
+        "filtered_started_count": started_count,
         "generated_at": beijing_time(),
         "official_page": "https://m.sporttery.cn/mjc/jsq/zqspf/",
         "official_url": SPORTTERY_CALCULATOR_URL,
@@ -2918,6 +2928,11 @@ def kickoff_gate(match: dict) -> dict:
     if now >= cutoff:
         return {"allowed": False, "reason": "距离开赛不足30分钟，禁止下注。"}
     return {"allowed": True, "reason": f"距离开赛约{int((kickoff - now).total_seconds() // 60)}分钟。"}
+
+
+def match_has_started(match: dict) -> bool:
+    kickoff = parse_beijing_kickoff(match)
+    return bool(kickoff and datetime.now(BEIJING_TZ) >= kickoff)
 
 
 def decimal_odds_for_pick(match: dict, pick: str) -> float | None:

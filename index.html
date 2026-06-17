@@ -600,6 +600,24 @@ function cnDateTime(dateText){
   if (!m) return dateText || '时间待定';
   return `${m[1]}-${m[2]}-${m[3]} ${m[4] || '时间待定'}`;
 }
+function parseBeijingKickoff(match){
+  const value = String(match?.time || match?.match_time || '');
+  let parsed = value.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})/);
+  if (parsed) {
+    const [, year, month, day, hour, minute] = parsed.map(Number);
+    return new Date(year, month - 1, day, hour, minute);
+  }
+  parsed = value.match(/(\d{1,2}):(\d{2})/);
+  const dateMatch = String(match?.d || match?.date || '').match(/(\d{1,2})月(\d{1,2})日/);
+  if (!parsed || !dateMatch) return null;
+  const now = new Date();
+  return new Date(now.getFullYear(), Number(dateMatch[1]) - 1, Number(dateMatch[2]), Number(parsed[1]), Number(parsed[2]));
+}
+function hasMatchStarted(match, now=new Date()){
+  if (match?.finished || match?.api === '赛果') return true;
+  const kickoff = parseBeijingKickoff(match);
+  return kickoff ? now >= kickoff : false;
+}
 function probsFromDecimal(decimalOdds){
   const implied = decimalOdds.map(v => 1 / v);
   const total = implied.reduce((sum, v) => sum + v, 0) || 1;
@@ -991,9 +1009,18 @@ async function refreshSportteryOdds(){
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || '请求失败');
     let applied = 0;
-    if (data.status === 'ok') applied = applySportteryItems(data.matches || []);
+    if (data.status === 'ok') {
+      const filtered = [];
+      if (data.filtered_finished_count) filtered.push(`已移出已完赛 ${data.filtered_finished_count} 场`);
+      if (data.filtered_started_count) filtered.push(`已移出已开赛 ${data.filtered_started_count} 场`);
+      const prefix = filtered.length ? `已接入中国体育彩票竞彩网固定奖金，${filtered.join('，')}` : '已接入中国体育彩票竞彩网固定奖金';
+      applied = applySportteryItems(data.matches || [], prefix);
+    }
     if (source && data.status !== 'ok') {
-      const filteredText = data.filtered_finished_count ? `，已移出已完赛 ${data.filtered_finished_count} 场` : '';
+      const filtered = [];
+      if (data.filtered_finished_count) filtered.push(`已移出已完赛 ${data.filtered_finished_count} 场`);
+      if (data.filtered_started_count) filtered.push(`已移出已开赛 ${data.filtered_started_count} 场`);
+      const filteredText = filtered.length ? `，${filtered.join('，')}` : '';
       const statusText = `体彩源当前不可用：${data.note || data.status || '未知状态'}${filteredText}；可点“导入体彩 JSON”手动导入，页面先使用静态兜底赔率。`;
       source.querySelector('span').innerHTML = `<b>赔率源：</b>${escapeHtml(statusText)}`;
     }
@@ -1575,7 +1602,10 @@ function renderCalculator(){
   if (status && calcMatches.length) {
     const updated = calcSourceInfo.officialLastUpdate || calcMatches.map(match => match.oddsUpdateTime).filter(Boolean).sort().at(-1) || '未知';
     const sourceName = calcSourceInfo.source || '中国体育彩票竞彩网足球胜平负计算器';
-    const finished = calcSourceInfo.filteredFinishedCount ? `，已过滤已完赛 ${calcSourceInfo.filteredFinishedCount} 场` : '';
+    const filtered = [];
+    if (calcSourceInfo.filteredFinishedCount) filtered.push(`已过滤已完赛 ${calcSourceInfo.filteredFinishedCount} 场`);
+    if (calcSourceInfo.filteredStartedCount) filtered.push(`已过滤已开赛 ${calcSourceInfo.filteredStartedCount} 场`);
+    const filteredText = filtered.length ? `，${filtered.join('，')}` : '';
     const cacheAge = Number(calcSourceInfo.cacheAgeSeconds);
     const freshText = calcSourceInfo.realTime
       ? '实时刷新'
@@ -1583,7 +1613,7 @@ function renderCalculator(){
         ? `缓存 ${Math.max(0, Math.round(cacheAge))} 秒`
         : '已刷新';
     const generated = calcSourceInfo.generatedAt ? `，本地同步 ${escapeHtml(calcSourceInfo.generatedAt)}` : '';
-    status.innerHTML = `<b>数据源：</b>${escapeHtml(sourceName)}，采集 ${groups.length} 场 / ${calcMatches.length} 个玩法${finished}，${freshText}，官网更新时间 ${escapeHtml(updated)}${generated}。`;
+    status.innerHTML = `<b>数据源：</b>${escapeHtml(sourceName)}，采集 ${groups.length} 场 / ${calcMatches.length} 个玩法${filteredText}，${freshText}，官网更新时间 ${escapeHtml(updated)}${generated}。`;
   }
   const labels = ['主胜', '平局', '客胜'];
   list.innerHTML = groups.map(group => {
@@ -1639,7 +1669,8 @@ async function loadSportteryCalculator(options={}){
       cacheAgeSeconds: data.cache_age_seconds,
       cacheStale: !!data.cache_stale,
       realTime: !!data.real_time || !!options.refresh || !!options.manual,
-      filteredFinishedCount: Number(data.filtered_finished_count || 0)
+      filteredFinishedCount: Number(data.filtered_finished_count || 0),
+      filteredStartedCount: Number(data.filtered_started_count || 0)
     };
     const validKeys = new Set(calcMatches.map(calculatorMatchKey));
     calcSelections = new Map([...calcSelections.entries()].filter(([key]) => validKeys.has(String(key))));
@@ -1773,7 +1804,8 @@ function matchById(id, extraMatches=[]){
   return [...extraMatches, ...matches].find(match => String(match.id) === String(id));
 }
 function pendingMatches(){
-  return matches.filter(match => !match.finished);
+  const now = new Date();
+  return matches.filter(match => !match.finished && !hasMatchStarted(match, now));
 }
 function decimalForPick(match, pick){
   const idx = pick === '主胜' ? 0 : pick === '平局' ? 1 : 2;
@@ -2315,7 +2347,7 @@ function resultRowHtml(r){
   let resultCell = '';
   if (r.score_hit === true) resultCell = '<span class="hit">✅ 命中</span>';
   else if (r.score_hit === false) resultCell = '<span class="miss">❌ 未中</span>';
-  else resultCell = '<span class="skip">⚪ 无预测</span>';
+  else resultCell = '<span class="skip">⚪ 无赛前记录</span>';
   return `<div class="result-row">
     <div><strong>${teams}</strong> <span class="vs">vs</span> <strong>${away}</strong></div>
     <div><strong>${escapeHtml(r.actual_score || '-')}</strong></div>
