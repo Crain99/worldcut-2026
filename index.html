@@ -440,6 +440,7 @@
       </section>
     </div>
   </main>
+<script src="calculator-core.js"></script>
 <script>
 function scheduleMatch(id, dateTime, group, home, away, venue, result=''){
   const [datePart] = String(dateTime).split(' ');
@@ -1116,14 +1117,10 @@ function clearCalculatorSelections(){
   renderCalculator();
 }
 function normalizeCalculatorPassType(value){
-  const text = String(value || '').trim();
-  if (!text || text === '单关' || text.toLowerCase() === 'single') return 'single';
-  const matched = text.match(/(\d+)\s*(?:串|x)\s*1/i);
-  return matched ? `${matched[1]}x1` : 'single';
+  return CalculatorCore.normalizePassType(value);
 }
 function denormalizeCalculatorPassType(value){
-  const normalized = normalizeCalculatorPassType(value);
-  return normalized === 'single' ? '单关' : normalized.replace('x', '串');
+  return CalculatorCore.denormalizePassType(value);
 }
 function simMatchIdForCalculator(match){
   const scheduled = findScheduleMatch(matches, match?.home, match?.away);
@@ -1163,29 +1160,10 @@ function selectCalculatorPredictions(){
   if (!selected) setCalculatorStatus('当前选中场次已经不在最新计算器数据里，请重新选择。');
 }
 function calcCombinations(items, size){
-  if (size <= 0) return [[]];
-  if (size > items.length) return [];
-  const result = [];
-  const walk = (start, combo) => {
-    if (combo.length === size) {
-      result.push(combo.slice());
-      return;
-    }
-    for (let i = start; i <= items.length - (size - combo.length); i++) {
-      combo.push(items[i]);
-      walk(i + 1, combo);
-      combo.pop();
-    }
-  };
-  walk(0, []);
-  return result;
+  return CalculatorCore.combinations(items, size);
 }
 function calcLimitedPayout(productOdds, passSize, times){
-  let base = productOdds * 2;
-  if ([2, 3].includes(passSize) && base > 200000) base = 200000;
-  if ([4, 5].includes(passSize) && base > 500000) base = 500000;
-  if (passSize >= 6 && passSize <= 8 && base > 1000000) base = 1000000;
-  return Number((base * times).toFixed(2));
+  return CalculatorCore.limitedPayout(productOdds, passSize, times);
 }
 function formatCalcMoney(value){
   const n = Number(value || 0);
@@ -1265,76 +1243,15 @@ function calculateSportteryBonus(){
   const times = Math.max(1, Math.floor(Number(document.getElementById('calcTimes')?.value || 1)));
   const legs = selectedCalculatorLegs();
   const passType = updateCalculatorPassOptions(legs);
-  const passSize = passType === 'single' ? 1 : Number(passType.split('x')[0]);
-  const eligible = legs.filter(leg => passType === 'single' ? leg.supportsSingle : leg.supportsAllUp);
-  const combos = calcCombinations(eligible, passSize);
-  let betCount = 0;
-  let minPayout = 0;
-  let maxPayout = 0;
-  for (const combo of combos) {
-    let count = 1;
-    let minProduct = 1;
-    let maxProduct = 1;
-    for (const leg of combo) {
-      const odds = leg.odds.map(item => item.odds);
-      count *= odds.length;
-      minProduct *= Math.min(...odds);
-      maxProduct *= Math.max(...odds);
-    }
-    betCount += count;
-    minPayout += calcLimitedPayout(minProduct, passSize, times);
-    maxPayout += calcLimitedPayout(maxProduct, passSize, times);
-  }
-  const stake = betCount * 2 * times;
-  const profit = maxPayout - stake;
-  const breakEven = maxPayout > 0 ? (stake / maxPayout) * 100 : 0;
-  return {times, passType, passSize, candidateCount: calculatorCandidateCount(), selectedCount: legs.length, eligibleCount: eligible.length, betCount, stake, minPayout, maxPayout, profit, breakEven};
+  return CalculatorCore.calculateBonus({
+    legs,
+    passType,
+    times,
+    candidateCount: calculatorCandidateCount()
+  });
 }
 function cartesianOdds(legs){
-  const result = [];
-  const walk = (idx, current) => {
-    if (idx >= legs.length) {
-      result.push(current.slice());
-      return;
-    }
-    for (const odd of legs[idx].odds) {
-      current.push({leg: legs[idx], odd});
-      walk(idx + 1, current);
-      current.pop();
-    }
-  };
-  walk(0, []);
-  return result;
-}
-function calculatorTicketLeg(entry){
-  const match = entry.leg.match;
-  const odd = entry.odd;
-  return {
-    matchNo: match.matchNo || '',
-    match: `${match.home} vs ${match.away}`,
-    market: marketLabel(match),
-    pick: odd.label,
-    odds: Number(odd.odds || 0)
-  };
-}
-function buildCalculatorTicket(entryList, calc, index){
-  const legs = entryList.map(calculatorTicketLeg);
-  const combinedOdds = legs.reduce((acc, leg) => acc * Number(leg.odds || 1), 1);
-  const payout = calcLimitedPayout(combinedOdds, calc.passSize, calc.times);
-  const stake = 2 * calc.times;
-  const serial = `SIM-${Date.now().toString(36).toUpperCase()}-${String(index).padStart(3, '0')}`;
-  return {
-    index,
-    serial,
-    issuedAt: new Date().toLocaleString('zh-CN', {hour12: false}),
-    passType: denormalizeCalculatorPassType(calc.passType),
-    times: calc.times,
-    stake,
-    combinedOdds: Number(combinedOdds.toFixed(2)),
-    payout,
-    profit: Number((payout - stake).toFixed(2)),
-    legs
-  };
+  return CalculatorCore.cartesianOdds(legs);
 }
 function buildCalculatorTickets(limit=120){
   const calc = calculateSportteryBonus();
@@ -1348,22 +1265,15 @@ function buildCalculatorTickets(limit=120){
       : '当前没有可出票的选择。';
     return {calc, legs, tickets, omitted: 0, message};
   }
-  const pushTicket = entries => {
-    if (tickets.length >= limit) return;
-    tickets.push(buildCalculatorTicket(entries, calc, tickets.length + 1));
-  };
-  if (calc.passType === 'single') {
-    for (const leg of legs.filter(item => item.supportsSingle)) {
-      for (const odd of leg.odds) pushTicket([{leg, odd}]);
-    }
-  } else {
-    const eligible = legs.filter(leg => leg.supportsAllUp);
-    const combos = calcCombinations(eligible, calc.passSize);
-    for (const combo of combos) {
-      for (const pickCombo of cartesianOdds(combo)) pushTicket(pickCombo);
-    }
-  }
-  return {calc, legs, tickets, omitted: Math.max(0, calc.betCount - tickets.length), message: ''};
+  const result = CalculatorCore.buildTickets({
+    legs,
+    calc,
+    limit,
+    formatMarket: marketLabel,
+    serialBase: `SIM-${Date.now().toString(36).toUpperCase()}`,
+    issuedAt: new Date().toLocaleString('zh-CN', {hour12: false})
+  });
+  return {...result, message: ''};
 }
 function renderCalculatorTickets(options={}){
   const panel = document.getElementById('calcTicketPanel');
