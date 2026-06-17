@@ -39,6 +39,7 @@ SPORTTERY_PROXY_URLS = [item.strip() for item in os.getenv("SPORTTERY_PROXY_URLS
 SPORTTERY_OFFICIAL_URL = "https://webapi.sporttery.cn/gateway/uniform/football/getMatchListV1.qry?clientCode=3001"
 SPORTTERY_CALCULATOR_URL = "https://webapi.sporttery.cn/gateway/uniform/football/getMatchCalculatorV1.qry?channel=c&poolCode=hhad,had"
 SPORTTERY_HTTP_PROXY = os.getenv("SPORTTERY_HTTP_PROXY", "http://127.0.0.1:7890").strip()
+BAIDU_WORLDCUP_URL = "https://tiyu.baidu.com/al/match"
 CACHE_TTL_SECONDS = 600
 PROMPT_VERSION = "casual-v3"
 PREDICTION_CACHE: dict[str, dict] = {}
@@ -718,12 +719,106 @@ def result_pick(home_score: int, away_score: int) -> str:
     return "客胜"
 
 
+def fetch_baidu_text_cached(url: str, ttl_seconds: int = 300, headers: dict | None = None) -> str:
+    cached = DATA_CACHE.get(url)
+    now = time.monotonic()
+    if cached and now - cached["ts"] < ttl_seconds:
+        return cached["data"]
+    req = request.Request(url, headers=headers or {"User-Agent": "Mozilla/5.0"})
+    with request.urlopen(req, timeout=12) as resp:
+        text = resp.read().decode("utf-8", "ignore")
+    DATA_CACHE[url] = {"ts": now, "data": text}
+    return text
+
+
+def baidu_schedule_url(date_text: str) -> str:
+    return f"{BAIDU_WORLDCUP_URL}?{parse.urlencode({'match': '世界杯', 'date_time': date_text, 'tab': '赛程', 'from': 'baidu_aladdin'})}"
+
+
+def parse_baidu_schedule_days(html: str) -> list[dict]:
+    decoder = json.JSONDecoder()
+    days = []
+    seen_starts = set()
+    for match in re.finditer(r'\{"time":"20\d{2}-\d{2}-\d{2}"', html):
+        start = match.start()
+        if start in seen_starts:
+            continue
+        seen_starts.add(start)
+        try:
+            day, _ = decoder.raw_decode(html[start:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(day, dict) and isinstance(day.get("list"), list):
+            days.append(day)
+    return days
+
+
+def parse_baidu_results(html: str) -> dict:
+    results = {}
+    for day in parse_baidu_schedule_days(html):
+        for game in day.get("list", []):
+            if not isinstance(game, dict):
+                continue
+            status_text = str(game.get("matchStatusText") or game.get("dataSourceText") or "")
+            status = str(game.get("status") or game.get("matchStatus") or "")
+            if "已结束" not in status_text and status != "2":
+                continue
+            left = game.get("leftLogo") if isinstance(game.get("leftLogo"), dict) else {}
+            right = game.get("rightLogo") if isinstance(game.get("rightLogo"), dict) else {}
+            home = str(left.get("name") or "").strip()
+            away = str(right.get("name") or "").strip()
+            try:
+                hs = int(str(left.get("score") or "").strip())
+                away_s = int(str(right.get("score") or "").strip())
+            except (TypeError, ValueError):
+                continue
+            if not home or not away:
+                continue
+            item = {
+                "home": home,
+                "away": away,
+                "home_score": hs,
+                "away_score": away_s,
+                "pick": result_pick(hs, away_s),
+                "source": "百度体育",
+            }
+            for home_try in team_name_candidates(home):
+                for away_try in team_name_candidates(away):
+                    key = f"{normalize_team_text(home_try)}-{normalize_team_text(away_try)}"
+                    if key != "-":
+                        results[key] = item
+    return results
+
+
+def fetch_baidu_worldcup_results() -> dict:
+    today = datetime.now(BEIJING_TZ).date()
+    start = datetime(2026, 6, 12, tzinfo=BEIJING_TZ).date()
+    if today < start:
+        dates = [today]
+    else:
+        days = min((today - start).days, 45)
+        dates = [start + timedelta(days=offset) for offset in range(days + 1)]
+    results = {}
+    for date_value in dates:
+        try:
+            html = fetch_baidu_text_cached(baidu_schedule_url(date_value.isoformat()), ttl_seconds=300, headers={
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+                "Referer": "https://www.baidu.com/",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            })
+            results.update(parse_baidu_results(html))
+        except Exception:
+            continue
+    return results
+
+
 def fetch_worldcup_results() -> dict:
+    results = fetch_baidu_worldcup_results()
     try:
         data = fetch_json_cached("https://worldcup26.ir/get/games", ttl_seconds=300)
     except Exception:
-        return {}
-    results = {}
+        return results
     for game in data.get("games", []):
         if str(game.get("finished", "")).upper() != "TRUE":
             continue
@@ -746,7 +841,7 @@ def fetch_worldcup_results() -> dict:
         }
         for home, away in ((home_en, away_en), (home_fa, away_fa)):
             key = f"{normalize_team_text(home)}-{normalize_team_text(away)}"
-            if key != "-":
+            if key != "-" and key not in results:
                 results[key] = item
     return results
 
@@ -2258,8 +2353,13 @@ def _build_match_results() -> dict:
         result_en_to_cn[en] = cn
     EN_TO_CN_LOWER = {k.lower(): v for k, v in result_en_to_cn.items()}
     items = []
+    seen_result_fixtures = set()
     for key, r in results_raw.items():
         home_en, away_en = r["home"], r["away"]
+        fixture_key = f"{normalize_team_text(home_en)}-{normalize_team_text(away_en)}"
+        if fixture_key in seen_result_fixtures:
+            continue
+        seen_result_fixtures.add(fixture_key)
         home_cn = EN_TO_CN_LOWER.get(home_en.lower(), home_en)
         away_cn = EN_TO_CN_LOWER.get(away_en.lower(), away_en)
         pred_match = None
