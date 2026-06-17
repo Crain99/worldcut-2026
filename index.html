@@ -441,6 +441,7 @@
     </div>
   </main>
 <script src="calculator-core.js"></script>
+<script src="simulator-core.js"></script>
 <script>
 function scheduleMatch(id, dateTime, group, home, away, venue, result=''){
   const [datePart] = String(dateTime).split(' ');
@@ -1479,23 +1480,13 @@ function findCalculatorMatchForBet(bet){
   });
 }
 function pendingSimBets(){
-  return (simAccount.bets || []).filter(bet => !['已中', '未中', '已取消'].includes(bet.status));
+  return SimulatorCore.pendingBets(simAccount);
 }
 function simBetIdentity(bet){
-  return String(bet?.key || bet?.id || '');
+  return SimulatorCore.betIdentity(bet);
 }
 function chooseSimBetsForCalculator(targetKey=''){
-  const pending = pendingSimBets();
-  if (!pending.length) return [];
-  const requested = String(targetKey || '');
-  const anchor = requested
-    ? pending.find(bet => simBetIdentity(bet) === requested)
-    : pending.at(-1);
-  if (!anchor) return [];
-  if (anchor.calculatorSessionId) {
-    return pending.filter(bet => bet.calculatorSessionId === anchor.calculatorSessionId);
-  }
-  return [anchor];
+  return SimulatorCore.chooseBetsForCalculator(simAccount, targetKey);
 }
 function inferCalculatorTimesFromBets(bets){
   const values = bets
@@ -1750,24 +1741,7 @@ function loadLlmBetHistory(){
   return [];
 }
 function calculateLocalStats(){
-  const bets = Array.isArray(simAccount.bets) ? simAccount.bets : [];
-  const settled = bets.filter(bet => ['已中','未中'].includes(bet.status));
-  const pending = bets.filter(bet => !['已中','未中','已取消'].includes(bet.status));
-  const won = settled.filter(bet => bet.status === '已中');
-  const settledStake = settled.reduce((sum, bet) => sum + Number(bet.stake || 0), 0);
-  const pendingStake = pending.reduce((sum, bet) => sum + Number(bet.stake || 0), 0);
-  const realized = settled.reduce((sum, bet) => sum + Number(bet.settledProfit || 0), 0);
-  return {
-    total_bets: bets.length,
-    pending_bets: pending.length,
-    settled_bets: settled.length,
-    single_bets: bets.filter(bet => bet.type !== 'parlay').length,
-    parlay_bets: bets.filter(bet => bet.type === 'parlay').length,
-    pending_stake: Math.round(pendingStake),
-    realized_profit: Math.round(realized),
-    win_rate: settled.length ? ((won.length / settled.length) * 100).toFixed(1) : 0,
-    roi: settledStake ? ((realized / settledStake) * 100).toFixed(1) : 0
-  };
+  return SimulatorCore.calculateStats(simAccount);
 }
 function ensureSimAccount(){
   const inputBankroll = readBankrollInput();
@@ -2100,32 +2074,21 @@ function renderLedger(){
       </div>`;
     }).join('')}`;
 }
-function idsForSimBetItem(item){
-  const ids = new Set();
-  if (item?.id !== undefined && item?.id !== null) ids.add(String(item.id));
+function scheduleIdForSimBetItem(item){
   const homeAway = item?.home && item?.away ? {home: item.home, away: item.away} : matchNameParts(item?.match);
   if (homeAway.home && homeAway.away) {
     const scheduled = findScheduleMatch(matches, homeAway.home, homeAway.away);
-    if (scheduled) ids.add(String(scheduled.id));
+    if (scheduled) return scheduled.id;
   }
-  return [...ids];
+  return '';
+}
+function idsForSimBetItem(item){
+  return SimulatorCore.idsForBetItem(item, scheduleIdForSimBetItem);
 }
 function renderSimulation(){
   const visible = active === '全部' ? pendingMatches() : pendingMatches().filter(m => m.d === active);
   let totalStake = 0, totalProfit = 0, count = 0;
-  const activeBets = new Map();
-  for (const bet of simAccount.bets || []) {
-    if (bet.type === 'parlay') continue;
-    for (const id of idsForSimBetItem(bet)) activeBets.set(id, bet);
-  }
-  const parlayByMatch = new Map();
-  for (const bet of simAccount.bets || []) {
-    if (bet.type !== 'parlay') continue;
-    const ids = Array.isArray(bet.legs) && bet.legs.length
-      ? bet.legs.flatMap(idsForSimBetItem)
-      : String(bet.match || '').match(/tc-\d+/g) || [];
-    for (const id of ids) parlayByMatch.set(id, bet);
-  }
+  const {active: activeBets, parlays: parlayByMatch} = SimulatorCore.mapActiveBets(simAccount, scheduleIdForSimBetItem);
   const latestDecisions = new Map(((llmBetHistory[0] && llmBetHistory[0].decisions) || []).map(item => [String(item.id), item]));
   for (const match of visible) {
     const el = document.getElementById(`sim-${match.id}`);
