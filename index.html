@@ -548,6 +548,8 @@ let activeView = 'predictions';
 let finishedResults = [];
 let resultsRows = [];
 let resultsPage = 1;
+let predictionSnapshotRows = [];
+let predictionSnapshotInfo = {};
 const aiResults = new Map();
 const GLOBAL_SIM_ACCOUNT_ID = 'global';
 const AUTO_BET_STRATEGY_VERSION = 'research-v3';
@@ -865,6 +867,64 @@ function markFinishedMatches(targetList){
     });
   }
 }
+function predictionApiForPick(pick){
+  if (pick === '主胜' || pick === '平局' || pick === '客胜') return pick;
+  return '';
+}
+function pickFromScore(score){
+  const parts = String(score || '').match(/(\d{1,2})\s*[-‐‑‒–—]\s*(\d{1,2})/);
+  if (!parts) return '';
+  const home = Number(parts[1]);
+  const away = Number(parts[2]);
+  if (home > away) return '主胜';
+  if (home < away) return '客胜';
+  return '平局';
+}
+function displayPickForPrediction(match, api){
+  if (api === '主胜') return match.home;
+  if (api === '客胜') return match.away;
+  if (api === '平局') return '平局';
+  return match.pick;
+}
+function applyPredictionSnapshot(targetList=matches){
+  for (const row of predictionSnapshotRows) {
+    if (!row || (!row.predicted_score && !row.predicted_pick)) continue;
+    const target = findScheduleMatch(targetList, row.home, row.away);
+    if (!target || target.finished || target.api === '赛果') continue;
+    const api = predictionApiForPick(row.predicted_pick) || pickFromScore(row.predicted_score);
+    if (!api) continue;
+    const score = row.predicted_score || target.score;
+    Object.assign(target, {
+      pick: displayPickForPrediction(target, api),
+      api,
+      score,
+      conf: '赛前LLM',
+      predictionGeneratedAt: row.generated_at || '',
+      predictionModel: row.model || '',
+      predictionSource: predictionSnapshotInfo.source || 'SQLite 严格同场赛前预测',
+      why: `赛前LLM预测快照：${row.home} vs ${row.away}，预测方向 ${api}${score ? `，预测比分 ${score}` : ''}${row.generated_at ? `，生成于 ${row.generated_at}` : ''}。${row.summary ? stripSummaryText(row.summary) : ''}`
+    });
+  }
+}
+function stripSummaryText(text){
+  return String(text || '').replace(/[#*_`>|<>-]/g, '').replace(/\s+/g, ' ').trim().slice(0, 180);
+}
+async function loadPredictionSnapshot(){
+  try {
+    const res = await fetch('/api/prediction-snapshot', {cache:'no-store'});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '请求失败');
+    predictionSnapshotRows = Array.isArray(data.predictions) ? data.predictions : [];
+    predictionSnapshotInfo = data || {};
+    applyPredictionSnapshot(matches);
+    refreshDateFilters();
+    renderFilters();
+    render();
+  } catch (err) {
+    const source = document.getElementById('oddsSource');
+    if (source) source.querySelector('span').innerHTML = `<b>预测源：</b>赛前预测快照读取失败：${escapeHtml(err.message)}。`;
+  }
+}
 function walkJson(value, out=[]){
   if (Array.isArray(value)) {
     for (const child of value) walkJson(child, out);
@@ -975,6 +1035,7 @@ function applySportteryItems(items, statusPrefix='已接入中国体育彩票竞
     applied++;
   }
   markFinishedMatches(matches);
+  applyPredictionSnapshot(matches);
   refreshDateFilters();
   const source = document.getElementById('oddsSource');
   const ignored = valid.length - applied;
@@ -2207,7 +2268,7 @@ function render(){
       <div class="card-head"><div><div class="date">北京时间 ${m.time}</div><div class="date">${m.matchNo ? `${m.matchNo} · ` : ''}竞猜选项：${marketLabel(m)} · ${m.api}</div></div><div class="venue">${m.venue}<br>${String(m.oddsSource || '').includes('中国体育彩票竞彩网') ? '体彩固定奖金' : '兜底盘口'} ${m.odds.map(oddsLabel).join(' / ')}</div></div>
       <div class="teams">
         <div class="match"><div class="team"><strong>${m.home}</strong><span>主队</span></div><div class="vs">对阵</div><div class="team" style="text-align:right"><strong>${m.away}</strong><span>客队</span></div></div>
-        <div class="pick"><div><h3>预测：${m.pick}</h3><div class="tags"><span class="tag">置信度：${m.conf}</span><span class="tag market">盘口信号</span>${m.api === '平局' ? '<span class="tag draw">平局触发</span>' : ''}<span class="tag risk">阵容待确认</span></div></div><div class="score">${m.score}</div></div>
+        <div class="pick"><div><h3>预测：${m.pick}</h3><div class="tags"><span class="tag">置信度：${m.conf}</span>${m.predictionGeneratedAt ? '<span class="tag market">赛前快照</span>' : '<span class="tag market">盘口信号</span>'}${m.api === '平局' ? '<span class="tag draw">平局触发</span>' : ''}<span class="tag risk">${m.predictionGeneratedAt ? m.predictionGeneratedAt : '阵容待确认'}</span></div></div><div class="score">${m.score}</div></div>
       </div>
       <div class="probs"><div class="prob"><span>${m.home}胜</span><b>${m.probs[0]}%</b></div><div class="prob"><span>平局</span><b>${m.probs[1]}%</b></div><div class="prob"><span>${m.away}胜</span><b>${m.probs[2]}%</b></div></div>
       <div class="odds-row"><div class="odds-box"><span>${m.home}胜赔率</span><b>${decimalOddsLabel(m, 0)}</b></div><div class="odds-box"><span>平局赔率</span><b>${decimalOddsLabel(m, 1)}</b></div><div class="odds-box"><span>${m.away}胜赔率</span><b>${decimalOddsLabel(m, 2)}</b></div></div>
@@ -2492,6 +2553,7 @@ async function boot(){
     const source = document.getElementById('oddsSource');
     if (source) source.querySelector('span').innerHTML = `<b>模拟账户：</b>账户读取失败：${escapeHtml(err.message)}`;
   }
+  await loadPredictionSnapshot();
   refreshSportteryOdds();
 }
 boot();

@@ -439,6 +439,33 @@ def get_prediction_matches(limit: int = 5000) -> list[dict]:
     return result
 
 
+def build_prediction_snapshot() -> dict:
+    latest_by_fixture = {}
+    for item in get_prediction_matches(limit=5000):
+        key = strict_fixture_key(item.get("home", ""), item.get("away", ""))
+        if not key or key in latest_by_fixture:
+            continue
+        if not item.get("predicted_score") and not item.get("predicted_pick"):
+            continue
+        latest_by_fixture[key] = {
+            "match_id": item.get("match_id", ""),
+            "home": item.get("home", ""),
+            "away": item.get("away", ""),
+            "predicted_score": item.get("predicted_score", ""),
+            "predicted_pick": item.get("predicted_pick", ""),
+            "summary": item.get("summary", ""),
+            "model": item.get("model", ""),
+            "prompt_version": item.get("prompt_version", ""),
+            "generated_at": item.get("generated_at", ""),
+        }
+    return {
+        "predictions": list(latest_by_fixture.values()),
+        "total_predictions": len(latest_by_fixture),
+        "generated_at": beijing_time(),
+        "source": "SQLite 严格同场赛前预测",
+    }
+
+
 def default_sim_state(account_id: str) -> dict:
     return {
         "account_id": account_id,
@@ -2475,6 +2502,9 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/results":
             json_response(self, 200, get_match_results())
+            return
+        if parsed.path == "/api/prediction-snapshot":
+            json_response(self, 200, build_prediction_snapshot())
             return
         super().do_GET()
 
