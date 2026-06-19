@@ -23,6 +23,28 @@ except ImportError:
     HAS_DDGS = False
 
 ROOT = Path(__file__).resolve().parent
+
+
+def load_dotenv(path: Path) -> None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+load_dotenv(ROOT / ".env")
 DB_PATH = ROOT / "prediction_history.sqlite3"
 MODEL = os.getenv("OPENAI_MODEL", "gpt-5.5")
 BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com").rstrip("/")
