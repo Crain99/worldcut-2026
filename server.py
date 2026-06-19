@@ -410,7 +410,7 @@ def get_history(match_id: str | None = None, limit: int = 50) -> list[dict]:
             item["sources"] = json.loads(item.pop("sources_json") or "[]")[:5]
         except json.JSONDecodeError:
             item["sources"] = []
-        item["predicted_score"] = normalize_score_text(extract_predicted_score(analysis) or item.get("static_score", ""))
+        item["predicted_score"] = normalize_score_text(extract_predicted_score(analysis))
         item["predicted_pick"] = pick_from_score(item["predicted_score"]) or extract_predicted_pick(f"{analysis} {item.get('summary', '')}")
         result.append(item)
     return result
@@ -433,7 +433,7 @@ def get_prediction_matches(limit: int = 5000) -> list[dict]:
     for row in rows:
         item = dict(row)
         analysis = item.pop("analysis", "") or ""
-        item["predicted_score"] = normalize_score_text(extract_predicted_score(analysis) or item.get("static_score", ""))
+        item["predicted_score"] = normalize_score_text(extract_predicted_score(analysis))
         item["predicted_pick"] = pick_from_score(item["predicted_score"]) or extract_predicted_pick(f"{analysis} {item.get('summary', '')}")
         result.append(item)
     return result
@@ -614,6 +614,20 @@ def team_name_candidates(name: str) -> list[str]:
             seen.add(normalized)
             result.append(item)
     return result
+
+
+def canonical_fixture_team(name: str) -> str:
+    raw = str(name or "").strip()
+    cn = EN_TO_CN.get(raw.lower())
+    return normalize_team_text(cn or raw)
+
+
+def strict_fixture_key(home: str, away: str) -> str:
+    home_key = canonical_fixture_team(home)
+    away_key = canonical_fixture_team(away)
+    if not home_key or not away_key:
+        return ""
+    return f"{home_key}-{away_key}"
 
 
 def match_result_for_teams(home: str, away: str, results: dict) -> dict | None:
@@ -2337,12 +2351,9 @@ def _build_match_results() -> dict:
     result_en_to_cn = {v: k for k, v in TEAM_EN.items()}
     pred_by_key = {}
     for p in all_preds:
-        for home_try in team_name_candidates(p.get("home", "")):
-            for away_try in team_name_candidates(p.get("away", "")):
-                home_key = normalize_team_text(home_try)
-                away_key = normalize_team_text(away_try)
-                if home_key and away_key:
-                    pred_by_key.setdefault(f"{home_key}-{away_key}", p)
+        key = strict_fixture_key(p.get("home", ""), p.get("away", ""))
+        if key:
+            pred_by_key.setdefault(key, p)
     extra_map = {
         "south korea": "韩国", "czech republic": "捷克", "ecuador": "厄瓜多尔",
         "turkey": "土耳其", "sweden": "瑞典", "jordan": "约旦", "panama": "巴拿马",
@@ -2362,28 +2373,14 @@ def _build_match_results() -> dict:
         seen_result_fixtures.add(fixture_key)
         home_cn = EN_TO_CN_LOWER.get(home_en.lower(), home_en)
         away_cn = EN_TO_CN_LOWER.get(away_en.lower(), away_en)
-        pred_match = None
-        for home_try in team_name_candidates(home_cn) + team_name_candidates(home_en):
-            for away_try in team_name_candidates(away_cn) + team_name_candidates(away_en):
-                try_key = f"{normalize_team_text(home_try)}-{normalize_team_text(away_try)}"
-                if try_key in pred_by_key:
-                    pred_match = pred_by_key[try_key]
-                    break
-            if pred_match:
-                break
-        for home_try, away_try in [(home_cn, away_cn), (home_en, away_en)]:
-            if pred_match:
-                break
-            try_key = f"{normalize_team_text(home_try)}-{normalize_team_text(away_try)}"
-            if try_key in pred_by_key:
-                pred_match = pred_by_key[try_key]
+        pred_match = pred_by_key.get(strict_fixture_key(home_cn, away_cn))
         predicted_score = ""
         predicted_pick = ""
         actual_score = f"{r['home_score']}-{r['away_score']}"
         pick_hit = None
         score_hit = None
         if pred_match:
-            predicted_score = normalize_score_text(pred_match.get("predicted_score") or pred_match.get("static_score", ""))
+            predicted_score = normalize_score_text(pred_match.get("predicted_score", ""))
             predicted_pick = pick_from_score(predicted_score) or pred_match.get("predicted_pick") or ""
             if not predicted_pick:
                 predicted_pick = extract_predicted_pick(pred_match.get("summary", "").strip())
