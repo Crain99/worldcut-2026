@@ -422,7 +422,7 @@ def get_prediction_matches(limit: int = 5000) -> list[dict]:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT match_id, home, away, static_score, summary, analysis, generated_at, created_ts
+            SELECT match_id, home, away, static_score, summary, analysis, model, prompt_version, generated_at, created_ts
             FROM predictions
             ORDER BY created_ts DESC
             LIMIT ?
@@ -2377,13 +2377,6 @@ def _build_match_results() -> dict:
             try_key = f"{normalize_team_text(home_try)}-{normalize_team_text(away_try)}"
             if try_key in pred_by_key:
                 pred_match = pred_by_key[try_key]
-        if not pred_match:
-            home_lower = home_en.lower()
-            for p in all_preds:
-                p_home = p.get("home", "")
-                if home_lower in p_home.lower() or p_home in home_en:
-                    pred_match = p
-                    break
         predicted_score = ""
         predicted_pick = ""
         actual_score = f"{r['home_score']}-{r['away_score']}"
@@ -2407,6 +2400,9 @@ def _build_match_results() -> dict:
             "actual_pick": r["pick"],
             "predicted_score": predicted_score,
             "predicted_pick": predicted_pick,
+            "prediction_generated_at": pred_match.get("generated_at", "") if pred_match else "",
+            "prediction_model": pred_match.get("model", "") if pred_match else "",
+            "prediction_prompt_version": pred_match.get("prompt_version", "") if pred_match else "",
             "pick_hit": pick_hit,
             "score_hit": score_hit,
             "source": r.get("source", ""),
