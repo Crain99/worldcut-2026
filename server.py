@@ -8,6 +8,7 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from html import unescape
@@ -597,12 +598,16 @@ def save_client_sim_state(state: dict) -> dict:
 
 
 def normalize_team_text(value: str) -> str:
-    text = re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", str(value or "").lower())
+    folded = "".join(ch for ch in unicodedata.normalize("NFKD", str(value or "").lower()) if not unicodedata.combining(ch))
+    text = re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", folded)
     aliases = {
         "沙特阿拉伯": "沙特",
         "刚果金": "刚果金",
         "刚果民主共和国": "刚果金",
         "乌兹别克斯坦": "乌兹别克",
+        "curacao": "库拉索",
+        "democraticrepublicofthecongo": "刚果金",
+        "drcongo": "刚果金",
     }
     return aliases.get(text, text)
 
@@ -2394,7 +2399,7 @@ def _build_match_results() -> dict:
     seen_result_fixtures = set()
     for key, r in results_raw.items():
         home_en, away_en = r["home"], r["away"]
-        fixture_key = f"{normalize_team_text(home_en)}-{normalize_team_text(away_en)}"
+        fixture_key = strict_fixture_key(home_en, away_en)
         if fixture_key in seen_result_fixtures:
             continue
         seen_result_fixtures.add(fixture_key)
