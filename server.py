@@ -245,6 +245,7 @@ def init_db() -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_odds_snapshots_match ON odds_snapshots(match_key, captured_ts DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_odds_snapshots_teams ON odds_snapshots(home, away, captured_ts DESC)")
 
 
 def cache_key(match: dict) -> str:
@@ -677,10 +678,23 @@ def finished_result_for_match(match: dict) -> dict | None:
     return match_result_for_teams(match.get("home", ""), match.get("away", ""), fetch_worldcup_results())
 
 
-def odds_match_key(item: dict) -> str:
+def legacy_odds_match_key(item: dict) -> str:
     if item.get("match_no"):
         return f"no:{item.get('match_no')}"
     return f"{normalize_team_text(item.get('home'))}-{normalize_team_text(item.get('away'))}-{normalize_team_text(item.get('match_time'))}"
+
+
+def odds_match_key(item: dict) -> str:
+    market_code = str(item.get("market_code") or item.get("marketCode") or "HAD").strip().upper() or "HAD"
+    goal_line = str(item.get("goal_line") or item.get("goalLine") or "").strip()
+    market_suffix = f":{market_code}:{goal_line}" if goal_line else f":{market_code}"
+    if item.get("match_no"):
+        return f"no:{item.get('match_no')}{market_suffix}"
+    return (
+        f"{normalize_team_text(item.get('home'))}-"
+        f"{normalize_team_text(item.get('away'))}-"
+        f"{normalize_team_text(item.get('match_time'))}{market_suffix}"
+    )
 
 
 def save_odds_snapshots(matches: list[dict], source: str) -> None:
@@ -742,6 +756,17 @@ def get_odds_trends(matches: list[dict], limit: int = 12) -> dict:
                 """,
                 (key, limit),
             ).fetchall()
+            if not rows:
+                rows = conn.execute(
+                    """
+                    SELECT decimal_json, captured_at, captured_ts
+                    FROM odds_snapshots
+                    WHERE match_key = ?
+                    ORDER BY captured_ts DESC
+                    LIMIT ?
+                    """,
+                    (legacy_odds_match_key(item), limit),
+                ).fetchall()
             points = []
             for row in reversed(rows):
                 try:
@@ -2375,6 +2400,91 @@ def json_response(handler: SimpleHTTPRequestHandler, status: int, payload: dict)
     handler.wfile.write(body)
 
 
+def parse_beijing_datetime(value: str) -> datetime | None:
+    matched = re.search(r"(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})", str(value or ""))
+    if not matched:
+        return None
+    year, month, day, hour, minute = map(int, matched.groups())
+    return datetime(year, month, day, hour, minute, tzinfo=BEIJING_TZ)
+
+
+def latest_market_snapshot_before_kickoff(home: str, away: str) -> dict | None:
+    fixture_key = strict_fixture_key(home, away)
+    if not fixture_key:
+        return None
+    home_names = list(dict.fromkeys(team_name_candidates(home) or [home]))
+    away_names = list(dict.fromkeys(team_name_candidates(away) or [away]))
+    home_marks = ",".join("?" for _ in home_names)
+    away_marks = ",".join("?" for _ in away_names)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"""
+            SELECT home, away, match_time, match_no, decimal_json, source, captured_at, captured_ts
+            FROM odds_snapshots
+            WHERE home IN ({home_marks}) AND away IN ({away_marks})
+            ORDER BY captured_ts DESC
+            LIMIT 500
+            """,
+            (*home_names, *away_names),
+        ).fetchall()
+    for row in rows:
+        if strict_fixture_key(row["home"], row["away"]) != fixture_key:
+            continue
+        kickoff = parse_beijing_datetime(row["match_time"])
+        if kickoff and float(row["captured_ts"] or 0) >= kickoff.timestamp():
+            continue
+        try:
+            decimal = json.loads(row["decimal_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(decimal, list) or len(decimal) < 3:
+            continue
+        normalized_decimal = []
+        for value in decimal[:3]:
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                normalized_decimal = []
+                break
+            if numeric <= 1:
+                normalized_decimal = []
+                break
+            normalized_decimal.append(numeric)
+        if len(normalized_decimal) != 3:
+            continue
+        return {
+            "decimal": normalized_decimal,
+            "captured_at": row["captured_at"],
+            "captured_ts": row["captured_ts"],
+            "match_no": row["match_no"],
+            "match_time": row["match_time"],
+            "source": row["source"] or "中国体育彩票竞彩网",
+        }
+    return None
+
+
+def market_prediction_backfill(home: str, away: str) -> dict | None:
+    snapshot = latest_market_snapshot_before_kickoff(home, away)
+    if not snapshot:
+        return None
+    probs = probs_from_decimal(snapshot["decimal"])
+    max_idx = probs.index(max(probs))
+    api_pick = ("主胜", "平局", "客胜")[max_idx]
+    return {
+        "predicted_score": score_from_market(api_pick, probs),
+        "predicted_pick": api_pick,
+        "generated_at": snapshot.get("captured_at", ""),
+        "model": "sporttery-market-snapshot",
+        "prompt_version": "odds-backfill-v1",
+        "source": snapshot.get("source", ""),
+        "source_note": "无严格同场 LLM 赛前记录，使用开赛前最后一条体彩赔率快照补录。",
+        "odds_decimal": snapshot.get("decimal", []),
+        "odds_probs": probs,
+        "match_no": snapshot.get("match_no", ""),
+    }
+
+
 def _build_match_results() -> dict:
     results_raw = fetch_worldcup_results()
     if not results_raw:
@@ -2420,6 +2530,15 @@ def _build_match_results() -> dict:
                 pick_hit = (predicted_pick == r["pick"])
             if predicted_score:
                 score_hit = (predicted_score == actual_score)
+        else:
+            pred_match = market_prediction_backfill(home_cn, away_cn)
+            if pred_match:
+                predicted_score = pred_match.get("predicted_score", "")
+                predicted_pick = pred_match.get("predicted_pick", "")
+                if predicted_pick:
+                    pick_hit = (predicted_pick == r["pick"])
+                if predicted_score:
+                    score_hit = (predicted_score == actual_score)
         items.append({
             "home": home_cn,
             "away": away_cn,
@@ -2432,6 +2551,9 @@ def _build_match_results() -> dict:
             "prediction_generated_at": pred_match.get("generated_at", "") if pred_match else "",
             "prediction_model": pred_match.get("model", "") if pred_match else "",
             "prediction_prompt_version": pred_match.get("prompt_version", "") if pred_match else "",
+            "prediction_source_note": pred_match.get("source_note", "") if pred_match else "",
+            "prediction_odds_decimal": pred_match.get("odds_decimal", []) if pred_match else [],
+            "prediction_odds_probs": pred_match.get("odds_probs", []) if pred_match else [],
             "pick_hit": pick_hit,
             "score_hit": score_hit,
             "source": r.get("source", ""),

@@ -2409,8 +2409,11 @@ function resultRowHtml(r){
   if (r.score_hit === true) resultCell = '<span class="hit">✅ 命中</span>';
   else if (r.score_hit === false) resultCell = '<span class="miss">❌ 未中</span>';
   else resultCell = '<span class="skip">⚪ 无赛前记录</span>';
+  const modelLabel = r.prediction_model === 'sporttery-market-snapshot'
+    ? '体彩赛前赔率快照补录'
+    : (r.prediction_model || '');
   const predictionMeta = r.prediction_generated_at
-    ? `<br><span style="color:var(--muted);font-size:12px">${escapeHtml(r.prediction_generated_at)}${r.prediction_model ? ` · ${escapeHtml(r.prediction_model)}` : ''}</span>`
+    ? `<br><span style="color:var(--muted);font-size:12px">${escapeHtml(r.prediction_generated_at)}${modelLabel ? ` · ${escapeHtml(modelLabel)}` : ''}</span>`
     : '';
   return `<div class="result-row">
     <div><strong>${teams}</strong> <span class="vs">vs</span> <strong>${away}</strong></div>
