@@ -1,0 +1,32 @@
+[
+  {
+    "home": "阿根廷",
+    "away": "奥地利",
+    "predicted_score": "2-0",
+    "predicted_pick": "主胜",
+    "generated_at": "2026-06-23 20:50 北京时间",
+    "model": "service-outage-backfill",
+    "prompt_version": "outage-backfill-v1",
+    "source_note": "服务停机期间未采集到原始 LLM/体彩赛前快照；按赛前可用的首轮赛果、实力层级和常规市场方向补录，不作为原始赛前记录。"
+  },
+  {
+    "home": "法国",
+    "away": "伊拉克",
+    "predicted_score": "2-0",
+    "predicted_pick": "主胜",
+    "generated_at": "2026-06-23 20:50 北京时间",
+    "model": "service-outage-backfill",
+    "prompt_version": "outage-backfill-v1",
+    "source_note": "服务停机期间未采集到原始 LLM/体彩赛前快照；按赛前可用的首轮赛果、实力层级和常规市场方向补录，不作为原始赛前记录。"
+  },
+  {
+    "home": "挪威",
+    "away": "塞内加尔",
+    "predicted_score": "2-1",
+    "predicted_pick": "主胜",
+    "generated_at": "2026-06-23 20:50 北京时间",
+    "model": "service-outage-backfill",
+    "prompt_version": "outage-backfill-v1",
+    "source_note": "服务停机期间未采集到原始 LLM/体彩赛前快照；按赛前可用的首轮赛果、实力层级和常规市场方向补录，不作为原始赛前记录。"
+  }
+]

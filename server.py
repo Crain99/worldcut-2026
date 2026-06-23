@@ -46,6 +46,7 @@ def load_dotenv(path: Path) -> None:
 
 load_dotenv(ROOT / ".env")
 DB_PATH = ROOT / "prediction_history.sqlite3"
+PREDICTION_BACKFILLS_PATH = ROOT / "prediction_backfills.json"
 MODEL = os.getenv("OPENAI_MODEL", "gpt-5.5")
 BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com").rstrip("/")
 SEARCH_API_URL = os.getenv("SEARCH_API_URL", "").strip()
@@ -2507,11 +2508,46 @@ def market_prediction_backfill(home: str, away: str) -> dict | None:
     }
 
 
+def configured_prediction_backfills() -> dict:
+    try:
+        entries = json.loads(PREDICTION_BACKFILLS_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as exc:
+        print(f"[prediction-backfill] invalid json: {exc}", flush=True)
+        return {}
+    if not isinstance(entries, list):
+        return {}
+    result = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        key = strict_fixture_key(entry.get("home", ""), entry.get("away", ""))
+        if not key:
+            continue
+        predicted_score = normalize_score_text(entry.get("predicted_score", ""))
+        predicted_pick = entry.get("predicted_pick") or pick_from_score(predicted_score)
+        if not predicted_score and not predicted_pick:
+            continue
+        result[key] = {
+            "predicted_score": predicted_score,
+            "predicted_pick": predicted_pick,
+            "generated_at": entry.get("generated_at", ""),
+            "model": entry.get("model", "service-outage-backfill"),
+            "prompt_version": entry.get("prompt_version", "outage-backfill-v1"),
+            "source_note": entry.get("source_note", ""),
+            "odds_decimal": entry.get("odds_decimal", []),
+            "odds_probs": entry.get("odds_probs", []),
+        }
+    return result
+
+
 def _build_match_results() -> dict:
     results_raw = fetch_worldcup_results()
     if not results_raw:
         return {"results": [], "summary": "暂无已完赛数据。", "generated_at": beijing_time()}
     all_preds = get_prediction_matches(limit=5000)
+    outage_backfills = configured_prediction_backfills()
     result_en_to_cn = {v: k for k, v in TEAM_EN.items()}
     pred_by_key = {}
     for p in all_preds:
@@ -2553,7 +2589,10 @@ def _build_match_results() -> dict:
             if predicted_score:
                 score_hit = (predicted_score == actual_score)
         else:
-            pred_match = market_prediction_backfill(home_cn, away_cn)
+            pred_match = (
+                market_prediction_backfill(home_cn, away_cn)
+                or outage_backfills.get(strict_fixture_key(home_cn, away_cn))
+            )
             if pred_match:
                 predicted_score = pred_match.get("predicted_score", "")
                 predicted_pick = pred_match.get("predicted_pick", "")
